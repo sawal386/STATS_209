@@ -1,0 +1,268 @@
+---
+title: "project_test"
+output: html_document
+date: "2023-12-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Preliminary Analysis 
+```{r}
+setwd("/Users/sawal/Documents/stanford_ms_icme/courses/autumn_23/stats209/project")
+library(haven)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(estimatr)
+library(stargazer)
+library(broom)
+library(panelr)
+library(margins)
+library(betareg)
+library(synthdid)
+library(ggplot2)
+library(data.table)
+library(xtable)
+```
+#### Generating data for Incident Types Plot 
+```{r}
+main_df <- read_dta("clean_parliament_data.dta")
+casualty_df<- read_dta("casualty_info/casualty_data_joshi")
+casualty_df_sub <- na.omit(select(casualty_df, Year, IncidentOutcome, 
+                                    IncidentDistrict))
+casualty_df_sub$OutcomeDescription <- "Killed"
+casualty_df_sub$OutcomeDescription[casualty_df_sub$IncidentOutcome == 3] <- "Injured"
+casualty_df_sub$OutcomeDescription[casualty_df_sub$IncidentOutcome == 2] <- "Disappeared"
+```
+
+#### Plot of Incident Types 
+```{r}
+plot <- ggplot(casualty_df_sub, aes(x=as.factor(Year), fill=OutcomeDescription)) +     
+  geom_bar() + 
+  theme(axis.text.x = element_text(angle = 90, size = 10)) + 
+  labs(y="Victim Count", x="Year") +
+  guides(fill=guide_legend(title="Incident Type"))
+ggsave("incident_barplot.pdf", plot, width=11, height=6)
+```
+
+#### Plot for victim count by conflict intensity
+```{r}
+subset_2008 <- subset(main_df, year==2008)
+subset_2008$conflict_intensity <- "High"
+subset_2008$conflict_intensity[subset_2008$high_conflict_gov == 0] <- "Low"
+plot <- ggplot(data=subset_2008, aes(x=as.factor(District), y=vic_cn, fill=factor(conflict_intensity))) + geom_bar(stat="identity") +
+   theme_bw() + labs(y="Victim Count", x="District")+
+  theme(axis.text.x = element_text(angle = 90, size = 7.5))+
+  guides(fill=guide_legend(title="Conflict Intensity"))
+ggsave("conflict_barplot_distict.pdf", plot, width=11, height=6)
+ 
+subset_agg <- aggregate(vic_cn ~ high_conflict_gov, data=subset_2008, sum)
+subset_agg$intensity <- "High"
+subset_agg$intensity[subset_agg$high_conflict_gov == 0] <- "Low"
+plot_2 <- ggplot(data=subset_agg, aes(x=intensity, y=vic_cn)) + geom_bar(stat="identity", width=0.5) + 
+  labs(y="Victim Count", x="Conflict Intensity") + geom_col(width = 0.1)
+ggsave("conflict_intensity.pdf", plot_2, width=7, height=6)
+```
+
+#### Parallel Trend Plot 
+
+```{r}
+data_voter <- main_df[c("District", "year", "turnout_vage", "high_conflict_gov")]
+high_district <- unique(data_voter$District[data_voter$high_conflict_gov==1])
+data_voter$all_high <- as.numeric(data_voter$District  %in% high_district)
+test_agg_high <- aggregate(turnout_vage~year+all_high, data=data_voter, 
+                           mean, na.action = NULL, na.rm=FALSE)
+test_agg_high$intensity <- "high"
+test_agg_high$intensity[test_agg_high$all_high == 0] <- "low"
+
+line_plot <- ggplot(data=test_agg_high, aes(x=as.factor(year), y=turnout_vage, group=intensity)) +
+  geom_line(aes(color=intensity)) + geom_point() + 
+  labs(y="Voter Turnout Rate", x="Year") + 
+  guides(color = guide_legend(title = "Conflict Intensity"))
+
+ggsave("parallel_trend.pdf",line_plot, width=7, height=4)
+```
+#### Running Baseline Difference in Difference 
+$$Y_{it} = \alpha + \beta D_i^{\text{HighConflict}} + \gamma T_t^{\text{Post}} + \delta \left(D_i^{\text{HighConflict}} \times T_t^{\text{Post}} \right) + \epsilon_{it} $$
+```{r}
+did_data <- main_df[c("District", "year", "turnout_vage", "high_conflict_gov")]
+did_data$turnout_vage[did_data$turnout_vage>100] <- 100
+did_data$turnout_rate <- did_data$turnout_vage / 100
+
+did_data$treated <- as.numeric(did_data$District  %in% high_district)
+did_data$post <- ifelse(did_data$year>2000, 1, 0)
+did_data$interaction <- did_data$treated * did_data$post
+did_data_sub <- subset(did_data, did_data$year < 2010  )
+did_regression <- lm(turnout_rate ~ post + treated + interaction, data=did_data_sub)
+summary(did_regression)
+table_output <- xtable(did_regression)
+print(table_output)
+#tidy(summary(did_regression)) ->did_regression
+
+#stargazer(did_regression, type='latex', summary=FALSE)
+```
+#### Placebo Test 
+We set 1996 as the treatment year and see that happens. 
+```{r}
+did_placebo <- main_df[c("District", "year", "turnout_vage", "high_conflict_gov")]
+did_placebo$turnout_vage[did_placebo$turnout_vage>100] <- 100
+did_placebo$turnout_rate <- did_placebo$turnout_vage / 100
+
+did_placebo$treated <- as.numeric(did_placebo$District  %in% high_district)
+did_placebo$post <- ifelse(did_placebo$year>1996, 1, 0)
+did_placebo$interaction <- did_placebo$treated * did_placebo$post
+did_sub_placebo <- subset(did_placebo, did_placebo$year<2000)
+did_reg_placebo <- lm(turnout_rate ~ post + treated + interaction, data=did_sub_placebo)
+table_placebo <- xtable(did_reg_placebo)
+print(table_placebo)
+```
+
+#### Adding covariate to the data 
+```{r}
+literacy_data <- read.csv("literacy_pooled_data.csv", check.names = FALSE)
+#literacy_panel <- panel_data(literacy_data, id=District, wave=)
+did_data_covar <- merge(did_data, literacy_data, by=c("year", "District"))
+did_data_covar$literacy_rate <- did_data_covar$literacy_rate / 100
+```
+
+#### Difference in Differences with Covariates
+```{r}
+did_regression_covar <- lm(turnout_rate ~ post + treated + interaction + literacy_rate, 
+                           data=did_data_covar)
+summary(did_regression_covar)
+table <- xtable(did_regression_covar)
+print(table)
+```
+
+#### Beta Regression 
+```{r}
+did_data$turnout_rate[did_data$turnout_rate ==1] <-0.99
+beta_reg <- betareg(turnout_rate ~ post + treated + interaction, data=did_data)
+summary(beta_reg)
+#table_beta <- xtable(summary(beta_reg))
+#print(table_beta)
+beta_m <- margins(beta_reg)
+summary(beta_m)
+```
+
+#### Looking at Election Counts
+```{r}
+data_election <- main_df[c("District", "year", "elec91_vote_cast", "elec94_vote_cast", 
+                           "elec99_vote_cast", "elec08_vote_cast", "elec13_vote_cast", "high_conflict_gov")]
+data_election <- data_election %>% mutate(votes = coalesce(elec91_vote_cast, elec94_vote_cast, 
+                           elec99_vote_cast, elec08_vote_cast, elec13_vote_cast)) 
+data_election$all_high <- as.numeric(data_election$District  %in% high_district)
+data_election <- data_election[c("District", "year", "votes", "all_high")]
+agg_election <- aggregate(votes~year+all_high, data=data_election, 
+                           mean, na.action = NULL, na.rm=FALSE)
+agg_election$intensity <- "high"
+agg_election$intensity[agg_election$all_high == 0] <- "low"
+
+line_plot <- ggplot(data=agg_election, aes(x=as.factor(year), y=votes, group=intensity)) +
+  geom_line(aes(color=intensity)) + geom_point() + 
+  labs(y="Total Votes", x="Year") + 
+  guides(color = guide_legend(title = "Conflict Intensity"))
+line_plot 
+```
+
+#### Compiling population statistics 
+```{r}
+data_population <- main_df[c("District", "year", "elec91_RegisteredVoters", "elec94_RegisteredVoters",
+                             "elec99_RegisteredVoters", "elec08_RegisteredVoters", 
+                             "elec13_RegisteredVoters")]
+data_population <- data_population %>% mutate(population = coalesce(elec91_RegisteredVoters, elec94_RegisteredVoters, 
+                           elec99_RegisteredVoters, elec08_RegisteredVoters, elec13_RegisteredVoters)) 
+data_population <- data_population[c("District", "year", "population")]
+data_pop_vote <- merge(data_population, data_election, by=c("year", "District"))
+data_pop_vote$treated <- as.numeric(data_pop_vote$District  %in% high_district)
+data_pop_vote$post <- ifelse(data_pop_vote$year>2000, 1, 0)
+data_pop_vote$interaction <- data_pop_vote$treated * data_pop_vote$post
+```
+
+#### GLM with poisson model 
+```{r}
+poisson.model <- glm(votes ~ treated + post +interaction + population , data=data_pop_vote, 
+                     family = poisson(link = "log"))
+lm_model <- lm(votes ~ treated + post +interaction + population, data =data_pop_vote)
+#summary(poisson.model)
+coef(lm_model)
+```
+
+```{r}
+panel.matrices.test = function(panel, unit = 1, time = 2, outcome = 3, treatment = 4, treated.last = TRUE) {
+  # TODO: add support for covariates X, i.e. could keep all other columns
+  keep = c(unit, time, outcome, treatment)
+  if (!all(keep %in% 1:ncol(panel) | keep %in% colnames(panel))) {
+    stop("Column identifiers should be either integer or column names in `panel`.")
+  }
+  index.to.name = function(x) { if(x %in% 1:ncol(panel)) { colnames(panel)[x] } else { x } }
+  unit = index.to.name(unit)
+  time = index.to.name(time)
+  outcome = index.to.name(outcome)
+  treatment = index.to.name(treatment)
+  keep = c(unit, time, outcome, treatment)
+
+  panel = panel[keep]
+  if (!is.data.frame(panel)){
+    stop("Unsupported input type `panel.`")
+  }
+  if (anyNA(panel)) {
+    stop("Missing values in `panel`.")
+  }
+  if (length(unique(panel[, treatment])) == 1) {
+    print(panel[, treatment])
+    stop("There is no variation in treatment status.")
+  }
+  if (!all(panel[, treatment] %in% c(0, 1))) {
+    stop("The treatment status should be in 0 or 1.")
+  }
+  # Convert potential factor/date columns to character
+  panel = data.frame(
+    lapply(panel, function(col) {if (is.factor(col) || inherits(col, "Date")) as.character(col) else col}), stringsAsFactors = FALSE
+  )
+  val <- as.vector(table(panel[, unit], panel[, time]))
+  if (!all(val == 1)) {
+    stop("Input `panel` must be a balanced panel: it must have an observation for every unit at every time.")
+  }
+
+  panel = panel[order(panel[, unit], panel[, time]), ]
+  num.years = length(unique(panel[, time]))
+  num.units = length(unique(panel[, unit]))
+  Y = matrix(panel[,outcome], num.units, num.years, byrow = TRUE,
+             dimnames = list(unique(panel[,unit]), unique(panel[,time])))
+  W = matrix(panel[,treatment], num.units, num.years, byrow = TRUE,
+             dimnames = list(unique(panel[,unit]), unique(panel[,time])))
+  w = apply(W, 1, any)                         # indicator for units that are treated at any time
+  T0 = unname(which(apply(W, 2, any))[1]-1)    # last period nobody is treated
+  N0 = sum(!w)
+
+  if(! (all(W[!w,] == 0) && all(W[,1:T0] == 0) && all(W[w, (T0+1):ncol(Y)]==1))) {
+    stop("The package cannot use this data. Treatment adoption is not simultaneous.")
+  }
+
+  unit.order = if(treated.last) { order(W[,T0+1], rownames(Y)) } else { 1:nrow(Y) }
+  list(Y = Y[unit.order, ], N0 = N0, T0 = T0, W = W[unit.order, ])
+}
+
+```
+#### Using synthetic controls 
+(constructed with the help of : https://towardsdatascience.com/synthdid-101-a-beginners-guide-to-synthetic-difference-in-differences-84fed9b730ae)
+
+```{r}
+did_data_synth <- did_data[c("District", "year", "turnout_vage", "interaction")]
+did_data_synth$turnout_vage <- did_data_synth$turnout_vage / 100
+did_data_synth <- as.data.frame(as_tibble(did_data_synth))
+matrix <- panel.matrices(did_data_synth, unit=1, time=2,
+                          outcome=3, treatment=4)
+synth_did <- synthdid_estimate(matrix$Y, matrix$N0, matrix$T0)
+se <- sqrt(vcov(synth_did, method='jackknife'))
+te_est <- sprintf('Point estimate for the treatment effect: %1.2f', synth_did)
+CI <- sprintf('95%% CI (%1.2f, %1.2f)', synth_did - 1.96 * se, synth_did + 1.96 * se)
+print(CI)
+print(summary(synth_did))
+table_synth <- xtable(synth_did)
+print(table_synth)
+
+```
